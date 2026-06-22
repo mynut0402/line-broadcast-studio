@@ -1,0 +1,54 @@
+name: Build and attach Windows release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Restore icon and version
+        shell: pwsh
+        run: |
+          $version = $env:RELEASE_TAG.TrimStart('v')
+          $version | Set-Content -Encoding utf8 version.txt
+          $icon = [Convert]::FromBase64String((Get-Content -Raw icon.b64))
+          [IO.File]::WriteAllBytes("1.ico", $icon)
+
+      - name: Install build dependencies
+        run: python -m pip install pyinstaller requests
+
+      - name: Build application
+        shell: pwsh
+        run: >-
+          python -m PyInstaller
+          --noconfirm
+          --clean
+          --onefile
+          --windowed
+          --name "LINE Broadcast Studio"
+          --icon "1.ico"
+          --add-data "1.ico;."
+          --add-data "version.txt;."
+          line_broadcast_ui.py
+
+      - name: Attach executable to release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$env:RELEASE_TAG" "dist/LINE Broadcast Studio.exe" --clobber
