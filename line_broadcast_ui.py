@@ -704,13 +704,13 @@ style.configure(
 style.map("Token.Treeview", background=[("selected", COLORS["border"])], foreground=[("selected", COLORS["text"])])
 
 app = tk.Frame(root, bg=COLORS["bg"])
-app.pack(fill="both", expand=True, padx=34, pady=26)
+app.pack(fill="both", expand=True, padx=26, pady=18)
 app.grid_columnconfigure(0, weight=0, minsize=360)
 app.grid_columnconfigure(1, weight=1)
 app.grid_rowconfigure(1, weight=1)
 
 header = tk.Frame(app, bg=COLORS["bg"])
-header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 22))
+header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 14))
 tk.Label(header, text="Ntw", bg=COLORS["bg"], fg=COLORS["text"], font=("Segoe UI Semibold", 22)).pack(side="left")
 tk.Label(header, text="STUDIO", bg=COLORS["accent"], fg="#07140C", font=("Segoe UI Semibold", 8), padx=8, pady=4).pack(side="left", padx=10)
 status_box = tk.Frame(header, bg=COLORS["bg"])
@@ -727,7 +727,7 @@ btn_update = tk.Button(
 )
 btn_update.pack(side="right", padx=(0, 18))
 
-left_card = tk.Frame(app, bg=COLORS["surface"], padx=22, pady=20, highlightthickness=1, highlightbackground=COLORS["border"])
+left_card = tk.Frame(app, bg=COLORS["surface"], padx=22, pady=18, highlightthickness=1, highlightbackground=COLORS["border"])
 left_card.grid(row=1, column=0, sticky="nsew", padx=(0, 18))
 left_card.grid_columnconfigure(0, weight=1)
 tk.Label(left_card, text="การเชื่อมต่อ", bg=COLORS["surface"], fg=COLORS["text"], font=("Segoe UI Semibold", 13)).grid(row=0, column=0, sticky="w")
@@ -749,11 +749,11 @@ right.grid(row=1, column=1, sticky="nsew")
 right.grid_columnconfigure(0, weight=1)
 right.grid_rowconfigure(2, weight=1)
 
-token_card = tk.Frame(right, bg=COLORS["surface"], padx=22, pady=18, highlightthickness=1, highlightbackground=COLORS["border"])
-token_card.grid(row=0, column=0, sticky="ew", pady=(0, 16))
+token_card = tk.Frame(right, bg=COLORS["surface"], padx=20, pady=14, highlightthickness=1, highlightbackground=COLORS["border"])
+token_card.grid(row=0, column=0, sticky="ew", pady=(0, 12))
 token_card.grid_columnconfigure(0, weight=1)
 token_head = tk.Frame(token_card, bg=COLORS["surface"])
-token_head.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+token_head.grid(row=0, column=0, sticky="ew", pady=(0, 10))
 tk.Label(token_head, text="LINE Channel Tokens", bg=COLORS["surface"], fg=COLORS["text"], font=("Segoe UI Semibold", 12)).pack(side="left")
 token_count = tk.Label(token_head, text="พร้อมส่ง 0 / 0", bg=COLORS["surface_alt"], fg=COLORS["accent"], font=("Segoe UI Semibold", 8), padx=8, pady=4)
 token_count.pack(side="right")
@@ -764,7 +764,7 @@ tk.Label(add_labels, text="ชื่อ LINE OA", width=18, anchor="w", bg=COLOR
 tk.Label(add_labels, text="CHANNEL ACCESS TOKEN", anchor="w", bg=COLORS["surface"], fg=COLORS["muted"], font=("Segoe UI", 8)).pack(side="left", padx=(8, 0))
 
 add_row = tk.Frame(token_card, bg=COLORS["surface"])
-add_row.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+add_row.grid(row=2, column=0, sticky="ew", pady=(0, 8))
 add_row.grid_columnconfigure(1, weight=1)
 ent_oa_name = tk.Entry(
     add_row, width=18, bg=COLORS["input"], fg=COLORS["text"], insertbackground=COLORS["text"],
@@ -790,7 +790,7 @@ btn_add_token.grid(row=0, column=2, padx=(8, 0))
 token_wrap = tk.Frame(token_card, bg=COLORS["input"], highlightthickness=1, highlightbackground=COLORS["border"])
 token_wrap.grid(row=3, column=0, sticky="ew")
 token_list = ttk.Treeview(
-    token_wrap, columns=("status", "name", "token"), show="headings", height=4,
+    token_wrap, columns=("status", "name", "token"), show="headings", height=3,
     selectmode="browse", style="Token.Treeview",
 )
 token_list.heading("status", text="สถานะ")
@@ -820,10 +820,10 @@ token_actions.grid(row=4, column=0, sticky="ew", pady=(9, 0))
 tk.Label(token_actions, text="คลิก Checkbox ด้านหน้าสถานะเพื่อเปิด/ปิด", bg=COLORS["surface"], fg=COLORS["muted"], font=("Segoe UI", 8)).pack(side="left")
 tk.Button(token_actions, text="ลบ", command=remove_selected_token, bg=COLORS["surface"], fg=COLORS["danger"], activebackground=COLORS["surface_alt"], activeforeground=COLORS["danger"], relief="flat", cursor="hand2", font=("Segoe UI", 8), padx=8).pack(side="right")
 
-settings_card = tk.Frame(right, bg=COLORS["surface"], padx=22, pady=14, highlightthickness=1, highlightbackground=COLORS["border"])
-settings_card.grid(row=1, column=0, sticky="ew", pady=(0, 16))
+settings_card = tk.Frame(right, bg=COLORS["surface"], padx=20, pady=12, highlightthickness=1, highlightbackground=COLORS["border"])
+settings_card.grid(row=1, column=0, sticky="ew", pady=(0, 12))
 settings_card.grid_columnconfigure(1, weight=1)
-tk.Label(settings_card, text="Broadcast Settings", bg=COLORS["surface"], fg=COLORS["text"], font=("Segoe UI Semibold", 12)).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+tk.Label(settings_card, text="Broadcast Settings", bg=COLORS["surface"], fg=COLORS["text"], font=("Segoe UI Semibold", 11)).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
 tk.Label(settings_card, text="Delay ส่ง / กลุ่ม (วินาที)", bg=COLORS["surface"], fg=COLORS["muted"], font=("Segoe UI", 8)).grid(row=1, column=0, sticky="w", padx=(0, 12))
 ent_send_delay = tk.Entry(
     settings_card, width=10, bg=COLORS["input"], fg=COLORS["text"], insertbackground=COLORS["text"],
@@ -835,7 +835,7 @@ ent_send_delay.insert(0, "0")
 ent_send_delay.bind("<FocusOut>", save_cloudflare_settings)
 tk.Label(settings_card, text="ข้อความ Broadcast / altText", bg=COLORS["surface"], fg=COLORS["muted"], font=("Segoe UI", 8)).grid(row=1, column=1, sticky="w")
 txt_broadcast_message = tk.Text(
-    settings_card, height=2, bg=COLORS["input"], fg=COLORS["text"], insertbackground=COLORS["text"],
+    settings_card, height=1, bg=COLORS["input"], fg=COLORS["text"], insertbackground=COLORS["text"],
     relief="flat", font=("Segoe UI", 9), padx=8, pady=6, wrap="word",
     highlightthickness=1, highlightbackground=COLORS["border"], highlightcolor=COLORS["accent"],
 )
@@ -843,13 +843,13 @@ txt_broadcast_message.grid(row=2, column=1, sticky="ew")
 txt_broadcast_message.insert("1.0", DEFAULT_BROADCAST_MESSAGE)
 txt_broadcast_message.bind("<FocusOut>", save_cloudflare_settings)
 
-log_card = tk.Frame(right, bg=COLORS["surface"], padx=22, pady=18, highlightthickness=1, highlightbackground=COLORS["border"])
+log_card = tk.Frame(right, bg=COLORS["surface"], padx=20, pady=14, highlightthickness=1, highlightbackground=COLORS["border"])
 log_card.grid(row=2, column=0, sticky="nsew")
 log_card.grid_columnconfigure(0, weight=1)
-log_card.grid_rowconfigure(2, weight=1)
+log_card.grid_rowconfigure(2, weight=1, minsize=92)
 tk.Label(log_card, text="Activity log", bg=COLORS["surface"], fg=COLORS["text"], font=("Segoe UI Semibold", 12)).grid(row=0, column=0, sticky="w")
 progress = ttk.Progressbar(log_card, style="Modern.Horizontal.TProgressbar", mode="determinate")
-progress.grid(row=1, column=0, sticky="ew", pady=(12, 14))
+progress.grid(row=1, column=0, sticky="ew", pady=(10, 10))
 
 log_wrap = tk.Frame(log_card, bg=COLORS["input"])
 log_wrap.grid(row=2, column=0, sticky="nsew")
@@ -867,9 +867,9 @@ btn_start = tk.Button(
     right, text="เริ่ม Broadcast  →", command=start_broadcast,
     bg=COLORS["accent"], fg="#06130B", activebackground=COLORS["accent_hover"],
     activeforeground="#FFFFFF", disabledforeground="#647067", relief="flat",
-    font=("Segoe UI Semibold", 11), cursor="hand2", pady=13,
+    font=("Segoe UI Semibold", 11), cursor="hand2", pady=10,
 )
-btn_start.grid(row=3, column=0, sticky="ew", pady=(16, 0))
+btn_start.grid(row=3, column=0, sticky="ew", pady=(12, 0))
 
 load_tokens()
 load_cloudflare_settings()
