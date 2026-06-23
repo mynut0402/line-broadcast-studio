@@ -329,16 +329,38 @@ def install_downloaded_update(download_path, latest_version):
         f"$backup = {powershell_literal(backup_exe)}\n"
         f"$log = {powershell_literal(update_log)}\n"
         f"$parentPid = {os.getpid()}\n"
+        f"$workDir = {powershell_literal(current_exe.parent)}\n"
         "$scriptPath = $MyInvocation.MyCommand.Path\n"
         "function Log($message) { Add-Content -LiteralPath $log -Value ((Get-Date -Format s) + ' ' + $message) -ErrorAction SilentlyContinue }\n"
+        "function Start-App($path) {\n"
+        "    try {\n"
+        "        Unblock-File -LiteralPath $path -ErrorAction SilentlyContinue\n"
+        "        Start-Process -FilePath $path -WorkingDirectory $workDir\n"
+        "        Log ('started app: ' + $path)\n"
+        "    } catch {\n"
+        "        Log ('start app failed: ' + $_.Exception.Message)\n"
+        "    }\n"
+        "}\n"
         "Log 'update helper started'\n"
-        "Wait-Process -Id $parentPid -ErrorAction SilentlyContinue\n"
-        "Start-Sleep -Milliseconds 1200\n"
+        "for ($wait = 0; $wait -lt 120; $wait++) {\n"
+        "    $proc = Get-Process -Id $parentPid -ErrorAction SilentlyContinue\n"
+        "    if (-not $proc) { break }\n"
+        "    if ($wait -eq 60) {\n"
+        "        Log 'parent still running after 30s; requesting stop'\n"
+        "        Stop-Process -Id $parentPid -Force -ErrorAction SilentlyContinue\n"
+        "    }\n"
+        "    Start-Sleep -Milliseconds 500\n"
+        "}\n"
+        "Start-Sleep -Milliseconds 800\n"
         "$updated = $false\n"
-        "for ($i = 0; $i -lt 180; $i++) {\n"
+        "for ($i = 0; $i -lt 240; $i++) {\n"
         "    if (-not (Test-Path -LiteralPath $source)) { break }\n"
         "    try {\n"
+        "        Unblock-File -LiteralPath $source -ErrorAction SilentlyContinue\n"
         "        Copy-Item -LiteralPath $source -Destination $target -Force -ErrorAction Stop\n"
+        "        $srcSize = (Get-Item -LiteralPath $source -ErrorAction Stop).Length\n"
+        "        $dstSize = (Get-Item -LiteralPath $target -ErrorAction Stop).Length\n"
+        "        if ($srcSize -ne $dstSize) { throw ('size mismatch source=' + $srcSize + ' target=' + $dstSize) }\n"
         "        Remove-Item -LiteralPath $source -Force -ErrorAction SilentlyContinue\n"
         "        $updated = $true\n"
         "        Log 'copy replace succeeded'\n"
@@ -367,9 +389,9 @@ def install_downloaded_update(download_path, latest_version):
         "    Log 'update failed: cannot replace executable, launching downloaded copy if available'\n"
         "}\n"
         "if ($updated -and (Test-Path -LiteralPath $target)) {\n"
-        "    Start-Process -FilePath $target\n"
+        "    Start-App $target\n"
         "} elseif (Test-Path -LiteralPath $source) {\n"
-        "    Start-Process -FilePath $source\n"
+        "    Start-App $source\n"
         "}\n"
         "Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue\n"
     )
@@ -400,8 +422,11 @@ def install_downloaded_update(download_path, latest_version):
 
     messagebox.showinfo("พร้อมติดตั้ง", f"ดาวน์โหลด v{latest_version} แล้ว โปรแกรมจะเปิดใหม่อัตโนมัติ")
     save_cloudflare_settings()
-    root.quit()
-    root.destroy()
+    try:
+        root.quit()
+        root.destroy()
+    finally:
+        os._exit(0)
 
 
 def save_tokens():
