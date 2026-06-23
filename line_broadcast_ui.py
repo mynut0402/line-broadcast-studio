@@ -313,50 +313,65 @@ def download_update_worker(latest_version, download_url):
         set_update_button()
 
 
-def batch_value(value):
-    return str(value).replace("%", "%%")
+def powershell_literal(value):
+    return "'" + str(value).replace("'", "''") + "'"
 
 
 def install_downloaded_update(download_path, latest_version):
     current_exe = Path(sys.executable).resolve()
     update_log = APP_DATA_DIR / "updater.log"
     backup_exe = current_exe.with_suffix(current_exe.suffix + ".bak")
-    updater_script = APP_DATA_DIR / "install_update.cmd"
+    updater_script = APP_DATA_DIR / "install_update.ps1"
     script = (
-        "@echo off\n"
-        "setlocal\n"
-        f"set \"SOURCE={batch_value(download_path)}\"\n"
-        f"set \"TARGET={batch_value(current_exe)}\"\n"
-        f"set \"BACKUP={batch_value(backup_exe)}\"\n"
-        f"set \"LOG={batch_value(update_log)}\"\n"
-        "set \"UPDATED=0\"\n"
-        "for /l %%I in (1,1,120) do (\n"
-        "  if not exist \"%SOURCE%\" goto done\n"
-        "  if not exist \"%TARGET%\" (\n"
-        "    move /Y \"%SOURCE%\" \"%TARGET%\" >nul 2>nul && set \"UPDATED=1\" && goto done\n"
-        "  )\n"
-        "  del /F /Q \"%BACKUP%\" >nul 2>nul\n"
-        "  move /Y \"%TARGET%\" \"%BACKUP%\" >nul 2>nul\n"
-        "  if not errorlevel 1 (\n"
-        "    move /Y \"%SOURCE%\" \"%TARGET%\" >nul 2>nul\n"
-        "    if not errorlevel 1 (\n"
-        "      del /F /Q \"%BACKUP%\" >nul 2>nul\n"
-        "      set \"UPDATED=1\"\n"
-        "      goto done\n"
-        "    )\n"
-        "    move /Y \"%BACKUP%\" \"%TARGET%\" >nul 2>nul\n"
-        "  )\n"
-        "  timeout /t 1 /nobreak >nul\n"
-        ")\n"
-        ":done\n"
-        "if not \"%UPDATED%\"==\"1\" echo %date% %time% update failed>>\"%LOG%\"\n"
-        "if exist \"%TARGET%\" start \"\" \"%TARGET%\"\n"
-        "del /F /Q \"%~f0\" >nul 2>nul\n"
+        "$ErrorActionPreference = 'SilentlyContinue'\n"
+        f"$source = {powershell_literal(download_path)}\n"
+        f"$target = {powershell_literal(current_exe)}\n"
+        f"$backup = {powershell_literal(backup_exe)}\n"
+        f"$log = {powershell_literal(update_log)}\n"
+        f"$parentPid = {os.getpid()}\n"
+        "$scriptPath = $MyInvocation.MyCommand.Path\n"
+        "Wait-Process -Id $parentPid -ErrorAction SilentlyContinue\n"
+        "Start-Sleep -Milliseconds 700\n"
+        "$updated = $false\n"
+        "for ($i = 0; $i -lt 120; $i++) {\n"
+        "    if (-not (Test-Path -LiteralPath $source)) { break }\n"
+        "    try {\n"
+        "        Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue\n"
+        "        if (Test-Path -LiteralPath $target) {\n"
+        "            Move-Item -LiteralPath $target -Destination $backup -Force -ErrorAction Stop\n"
+        "        }\n"
+        "        Move-Item -LiteralPath $source -Destination $target -Force -ErrorAction Stop\n"
+        "        Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue\n"
+        "        $updated = $true\n"
+        "        break\n"
+        "    } catch {\n"
+        "        if ((Test-Path -LiteralPath $backup) -and -not (Test-Path -LiteralPath $target)) {\n"
+        "            Move-Item -LiteralPath $backup -Destination $target -Force -ErrorAction SilentlyContinue\n"
+        "        }\n"
+        "        Start-Sleep -Milliseconds 500\n"
+        "    }\n"
+        "}\n"
+        "if (-not $updated) {\n"
+        "    Add-Content -LiteralPath $log -Value ((Get-Date -Format s) + ' update failed: cannot replace executable')\n"
+        "}\n"
+        "if (Test-Path -LiteralPath $target) {\n"
+        "    Start-Process -FilePath $target\n"
+        "}\n"
+        "Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue\n"
     )
     try:
         updater_script.write_text(script, encoding="utf-8")
         subprocess.Popen(
-            ["cmd.exe", "/c", str(updater_script)],
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-WindowStyle",
+                "Hidden",
+                "-File",
+                str(updater_script),
+            ],
             creationflags=(
                 subprocess.CREATE_NO_WINDOW
                 | subprocess.DETACHED_PROCESS
