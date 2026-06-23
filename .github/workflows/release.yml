@@ -31,7 +31,7 @@ jobs:
           [IO.File]::WriteAllBytes("1.ico", $icon)
 
       - name: Install build dependencies
-        run: python -m pip install pyinstaller requests
+        run: python -m pip install -r requirements.txt
 
       - name: Build application
         shell: pwsh
@@ -43,6 +43,7 @@ jobs:
           --windowed
           --name "LINE Broadcast Studio"
           --icon "1.ico"
+          --collect-submodules "PIL"
           --add-data "1.ico;."
           --add-data "version.txt;."
           line_broadcast_ui.py
