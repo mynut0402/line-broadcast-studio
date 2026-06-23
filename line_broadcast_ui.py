@@ -1,4 +1,6 @@
 import json
+import copy
+import io
 import os
 import random
 import re
@@ -11,6 +13,11 @@ from pathlib import Path
 from tkinter import messagebox, simpledialog, ttk
 
 import requests
+
+try:
+    from PIL import Image, ImageOps, ImageTk
+except ImportError:
+    Image = ImageOps = ImageTk = None
 
 
 FLEX_IMAGES = [
@@ -49,6 +56,24 @@ UPDATE_ASSET_NAME = "LINE Broadcast Studio.exe"
 saved_tokens = []
 update_check_running = False
 DEFAULT_BROADCAST_MESSAGE = "สิทธิพิเศษระดับ SVIP สำหรับคุณ คืนยอดเสียทันที"
+DEFAULT_CUSTOM_FLEX_JSON = """{
+  "type": "bubble",
+  "size": "mega",
+  "body": {
+    "type": "box",
+    "layout": "vertical",
+    "contents": [
+      {
+        "type": "text",
+        "text": "วาง Flex JSON ของคุณตรงนี้",
+        "weight": "bold",
+        "size": "lg",
+        "wrap": true
+      }
+    ]
+  }
+}"""
+custom_flex_json_value = DEFAULT_CUSTOM_FLEX_JSON
 
 
 def read_app_version():
@@ -95,6 +120,53 @@ def get_flex_payload(chat_id, image_url, broadcast_message):
             },
         }],
     }
+
+
+def normalize_custom_flex(raw_json, alt_text):
+    raw_json = raw_json.strip()
+    if not raw_json:
+        raise ValueError("กรุณาวาง Flex JSON ก่อน หรือเลือกใช้ Template เดิม")
+
+    try:
+        data = json.loads(raw_json)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"Flex JSON ไม่ถูกต้อง: {error.msg} บรรทัด {error.lineno} คอลัมน์ {error.colno}")
+
+    alt_text = (alt_text or DEFAULT_BROADCAST_MESSAGE).strip() or DEFAULT_BROADCAST_MESSAGE
+
+    if isinstance(data, dict) and isinstance(data.get("messages"), list):
+        messages = data["messages"]
+    elif isinstance(data, dict) and data.get("type") == "flex":
+        message = data
+        if not message.get("altText"):
+            message["altText"] = alt_text
+        messages = [message]
+    elif isinstance(data, dict) and data.get("type") in ("bubble", "carousel"):
+        messages = [{"type": "flex", "altText": alt_text, "contents": data}]
+    elif isinstance(data, dict) and isinstance(data.get("contents"), dict):
+        messages = [{"type": "flex", "altText": alt_text, "contents": data["contents"]}]
+    else:
+        raise ValueError("Flex JSON ต้องเป็น bubble, carousel, flex message หรือ object ที่มี messages")
+
+    if not messages or len(messages) > 5:
+        raise ValueError("LINE ส่ง messages ได้ 1-5 รายการต่อครั้ง")
+
+    for index, message in enumerate(messages, start=1):
+        if not isinstance(message, dict):
+            raise ValueError(f"messages ลำดับ {index} ต้องเป็น object")
+        if message.get("type") == "flex":
+            if not message.get("altText"):
+                message["altText"] = alt_text
+            if not isinstance(message.get("contents"), dict):
+                raise ValueError(f"Flex message ลำดับ {index} ต้องมี contents")
+
+    return messages
+
+
+def build_push_payload(chat_id, image_url, broadcast_message, custom_messages=None):
+    if custom_messages is None:
+        return get_flex_payload(chat_id, image_url, broadcast_message)
+    return {"to": chat_id, "messages": copy.deepcopy(custom_messages)}
 
 
 def ui_call(callback, *args, **kwargs):
@@ -341,6 +413,8 @@ def save_cloudflare_settings(_event=None):
         "api_token": ent_cf_token.get().strip(),
         "send_delay": ent_send_delay.get().strip(),
         "broadcast_message": get_broadcast_message(),
+        "flex_mode": flex_mode_var.get(),
+        "custom_flex_json": get_custom_flex_json(),
     }
     try:
         SETTINGS_STORE.write_text(
@@ -352,6 +426,7 @@ def save_cloudflare_settings(_event=None):
 
 
 def load_cloudflare_settings():
+    global custom_flex_json_value
     source = SETTINGS_STORE if SETTINGS_STORE.exists() else LEGACY_SETTINGS_STORE
     if not source.exists():
         return
@@ -374,6 +449,14 @@ def load_cloudflare_settings():
     if isinstance(broadcast_message, str):
         txt_broadcast_message.delete("1.0", tk.END)
         txt_broadcast_message.insert("1.0", broadcast_message)
+    flex_mode = settings.get("flex_mode", "template")
+    if flex_mode in ("template", "custom"):
+        flex_mode_var.set(flex_mode)
+    custom_flex_json = settings.get("custom_flex_json", DEFAULT_CUSTOM_FLEX_JSON)
+    if isinstance(custom_flex_json, str):
+        custom_flex_json_value = custom_flex_json
+    update_payload_editor_state(persist=False)
+    refresh_flex_preview()
     if source == LEGACY_SETTINGS_STORE:
         save_cloudflare_settings()
 
@@ -385,6 +468,358 @@ def close_app():
 
 def get_broadcast_message():
     return txt_broadcast_message.get("1.0", tk.END).strip()
+
+
+def get_custom_flex_json():
+    return custom_flex_json_value.strip()
+
+
+def update_payload_editor_state(persist=True):
+    is_custom = flex_mode_var.get() == "custom"
+    if "btn_edit_flex" in globals():
+        btn_edit_flex.configure(state="normal" if is_custom else "disabled")
+    payload_hint.configure(
+        text="โหมด Template เดิม: ใช้รูป/ปุ่มตามที่ตั้งไว้" if not is_custom
+        else "โหมด Custom: กดแก้ไข Flex JSON หรือดูตัวอย่างเต็ม"
+    )
+    refresh_flex_preview()
+    if persist:
+        save_cloudflare_settings()
+
+
+def validate_custom_flex(show_success=True):
+    try:
+        messages = normalize_custom_flex(get_custom_flex_json(), get_broadcast_message())
+    except ValueError as error:
+        messagebox.showwarning("Flex JSON ไม่ถูกต้อง", str(error))
+        return None
+    if show_success:
+        messagebox.showinfo("Flex JSON ใช้ได้", f"ตรวจผ่าน • พบ {len(messages)} message")
+    return messages
+
+
+def extract_urls_from_object(value, parent_key=""):
+    found = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            found.extend(extract_urls_from_object(child, key))
+    elif isinstance(value, list):
+        for child in value:
+            found.extend(extract_urls_from_object(child, parent_key))
+    elif isinstance(value, str) and value.lower().startswith(("http://", "https://")):
+        kind = "รูปภาพ" if parent_key.lower() in ("url", "previewimageurl", "originalcontenturl") else "ลิงก์"
+        if parent_key.lower() == "uri":
+            kind = "ลิงก์"
+        found.append((kind, value))
+    return found
+
+
+def get_current_flex_assets():
+    if flex_mode_var.get() != "custom":
+        return [("รูปภาพ", url) for url in FLEX_IMAGES]
+    try:
+        data = json.loads(get_custom_flex_json())
+    except json.JSONDecodeError:
+        return []
+    seen = set()
+    unique = []
+    for kind, url in extract_urls_from_object(data):
+        if url not in seen:
+            seen.add(url)
+            unique.append((kind, url))
+    return unique
+
+
+def refresh_flex_preview(statuses=None):
+    if "flex_status" not in globals():
+        return
+    assets = get_current_flex_assets()
+    mode_text = "Template เดิม" if flex_mode_var.get() != "custom" else "Flex JSON"
+    if flex_mode_var.get() == "custom":
+        try:
+            messages = normalize_custom_flex(get_custom_flex_json(), get_broadcast_message())
+            flex_status.configure(text=f"{mode_text} ใช้ได้ • {len(messages)} message • URL {len(assets)} รายการ", fg=COLORS["accent"])
+        except ValueError as error:
+            flex_status.configure(text=f"JSON ผิด: {error}", fg=COLORS["danger"])
+    else:
+        flex_status.configure(text=f"ใช้ Flex Template ที่มากับโปรแกรม • รูป {len(assets)} รายการ", fg=COLORS["muted"])
+
+
+def parse_aspect_ratio(value):
+    if not isinstance(value, str) or ":" not in value:
+        return None
+    try:
+        width, height = value.split(":", 1)
+        width = float(width)
+        height = float(height)
+        if width > 0 and height > 0:
+            return width / height
+    except ValueError:
+        return None
+    return None
+
+
+def load_preview_image_data(url, max_width, aspect_ratio=None):
+    if Image is None or ImageTk is None:
+        raise RuntimeError("ต้องติดตั้ง Pillow ก่อนจึงจะแสดง Preview รูปภาพได้")
+    response = requests.get(url, timeout=12)
+    response.raise_for_status()
+    image = Image.open(io.BytesIO(response.content)).convert("RGBA")
+    if aspect_ratio:
+        target_height = max(1, int(max_width / aspect_ratio))
+        image = ImageOps.fit(image, (max_width, target_height), method=Image.Resampling.LANCZOS)
+    else:
+        ratio = max_width / image.width
+        image = image.resize((max_width, max(1, int(image.height * ratio))), Image.Resampling.LANCZOS)
+    return image
+
+
+def load_preview_photo(url, max_width, aspect_ratio=None):
+    return ImageTk.PhotoImage(load_preview_image_data(url, max_width, aspect_ratio))
+
+
+def render_text_component(parent, component):
+    text = str(component.get("text", ""))
+    if not text:
+        return
+    size_map = {
+        "xxs": 8, "xs": 9, "sm": 10, "md": 11, "lg": 14,
+        "xl": 17, "xxl": 20, "3xl": 24, "4xl": 28, "5xl": 32,
+    }
+    font_size = size_map.get(component.get("size"), 11)
+    weight = "bold" if component.get("weight") == "bold" else "normal"
+    color = component.get("color") or COLORS["text"]
+    label = tk.Label(
+        parent, text=text, bg="#111827", fg=color, justify="left", anchor="w",
+        wraplength=360, font=("Segoe UI", font_size, weight), padx=10, pady=4,
+    )
+    label.pack(fill="x")
+
+
+def render_image_component(parent, component, image_refs, max_width):
+    url = component.get("url")
+    if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+        return
+    holder = tk.Frame(parent, bg="#111827")
+    holder.pack(fill="x", pady=3)
+    placeholder = tk.Label(
+        holder, text=f"กำลังโหลดรูป...\n{url}", bg="#0F172A", fg=COLORS["muted"],
+        justify="left", wraplength=max_width, padx=10, pady=18, font=("Segoe UI", 9),
+    )
+    placeholder.pack(fill="x")
+
+    def worker():
+        try:
+            image = load_preview_image_data(url, max_width, parse_aspect_ratio(component.get("aspectRatio")))
+            root.after(0, show_image, image)
+        except Exception as error:
+            root.after(0, show_error, str(error))
+
+    def show_image(image):
+        if not holder.winfo_exists():
+            return
+        photo = ImageTk.PhotoImage(image)
+        image_refs.append(photo)
+        placeholder.configure(image=photo, text="", bg="#111827")
+
+    def show_error(error):
+        if not holder.winfo_exists():
+            return
+        placeholder.configure(
+            text=f"โหลดรูปไม่ได้\n{url}\n{error}", bg="#2A1220", fg=COLORS["danger"], pady=10,
+        )
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def render_flex_component(parent, component, image_refs, max_width):
+    if not isinstance(component, dict):
+        return
+    component_type = component.get("type")
+    if component_type == "image":
+        render_image_component(parent, component, image_refs, max_width)
+    elif component_type == "text":
+        render_text_component(parent, component)
+    elif component_type == "button":
+        action = component.get("action", {})
+        label = action.get("label") or action.get("uri") or "button"
+        tk.Label(
+            parent, text=str(label), bg=COLORS["accent"], fg="#06130B",
+            font=("Segoe UI Semibold", 11), padx=10, pady=8,
+        ).pack(fill="x", padx=8, pady=4)
+    elif component_type == "separator":
+        tk.Frame(parent, bg=COLORS["border"], height=1).pack(fill="x", padx=8, pady=6)
+    elif component_type == "box":
+        box = tk.Frame(parent, bg="#111827")
+        box.pack(fill="x", pady=2)
+        for child in component.get("contents", []):
+            render_flex_component(box, child, image_refs, max_width)
+    else:
+        for child in component.get("contents", []) if isinstance(component.get("contents"), list) else []:
+            render_flex_component(parent, child, image_refs, max_width)
+
+
+def render_bubble_preview(parent, bubble, image_refs, max_width):
+    card = tk.Frame(parent, bg="#111827", highlightthickness=1, highlightbackground=COLORS["border"])
+    card.pack(fill="x", padx=10, pady=10)
+    for section in ("hero", "body", "footer"):
+        component = bubble.get(section)
+        if component:
+            render_flex_component(card, component, image_refs, max_width)
+
+
+def render_contents_preview(parent, contents, image_refs, max_width):
+    if not isinstance(contents, dict):
+        return
+    if contents.get("type") == "carousel":
+        for index, bubble in enumerate(contents.get("contents", []), start=1):
+            tk.Label(
+                parent, text=f"Bubble {index}", bg=COLORS["bg"], fg=COLORS["muted"],
+                font=("Segoe UI Semibold", 9),
+            ).pack(anchor="w", padx=10, pady=(8, 0))
+            render_bubble_preview(parent, bubble, image_refs, max_width)
+    elif contents.get("type") == "bubble":
+        render_bubble_preview(parent, contents, image_refs, max_width)
+    else:
+        render_flex_component(parent, contents, image_refs, max_width)
+
+
+def open_full_flex_preview():
+    if Image is None or ImageTk is None:
+        messagebox.showwarning("Preview ไม่พร้อม", "ต้องติดตั้ง Pillow ก่อนจึงจะแสดง Preview รูปภาพได้")
+        return
+    if flex_mode_var.get() == "custom":
+        messages = validate_custom_flex(show_success=False)
+        if messages is None:
+            return
+    else:
+        messages = get_flex_payload("preview", FLEX_IMAGES[0], get_broadcast_message())["messages"]
+
+    preview = tk.Toplevel(root)
+    preview.title("Flex Preview")
+    preview.geometry("470x700")
+    preview.resizable(False, False)
+    preview.configure(bg=COLORS["bg"])
+    if ICON_PATH.exists():
+        try:
+            preview.iconbitmap(default=str(ICON_PATH))
+        except tk.TclError:
+            pass
+    preview.image_refs = []
+
+    tk.Label(
+        preview, text="Flex Preview", bg=COLORS["bg"], fg=COLORS["text"],
+        font=("Segoe UI Semibold", 16),
+    ).pack(anchor="w", padx=16, pady=(14, 4))
+    tk.Label(
+        preview, text="ตัวอย่างนี้แสดงภาพ/ข้อความหลักจาก Flex เพื่อเช็กหน้าตาโดยรวม",
+        bg=COLORS["bg"], fg=COLORS["muted"], font=("Segoe UI", 9),
+    ).pack(anchor="w", padx=16, pady=(0, 10))
+
+    canvas = tk.Canvas(preview, bg="#8AA4C0", highlightthickness=0)
+    canvas.pack(side="left", fill="both", expand=True, padx=(16, 0), pady=(0, 16))
+    scrollbar = ttk.Scrollbar(preview, command=canvas.yview)
+    scrollbar.pack(side="right", fill="y", padx=(0, 16), pady=(0, 16))
+    canvas.configure(yscrollcommand=scrollbar.set)
+
+    content = tk.Frame(canvas, bg="#8AA4C0")
+    canvas_window = canvas.create_window((0, 0), window=content, anchor="nw", width=420)
+
+    def sync_scroll(_event=None):
+        canvas.configure(scrollregion=canvas.bbox("all"))
+        canvas.itemconfigure(canvas_window, width=canvas.winfo_width())
+
+    content.bind("<Configure>", sync_scroll)
+    canvas.bind("<Configure>", sync_scroll)
+
+    for message in messages:
+        if message.get("type") == "flex":
+            render_contents_preview(content, message.get("contents"), preview.image_refs, 390)
+        else:
+            tk.Label(
+                content, text=json.dumps(message, ensure_ascii=False, indent=2),
+                bg="#111827", fg=COLORS["text"], justify="left", wraplength=380,
+                font=("Cascadia Mono", 8), padx=10, pady=10,
+            ).pack(fill="x", padx=10, pady=10)
+
+
+def open_custom_flex_editor():
+    global custom_flex_json_value
+    editor = tk.Toplevel(root)
+    editor.title("แก้ไข Flex JSON")
+    editor.geometry("820x620")
+    editor.resizable(False, False)
+    editor.configure(bg=COLORS["bg"])
+    if ICON_PATH.exists():
+        try:
+            editor.iconbitmap(default=str(ICON_PATH))
+        except tk.TclError:
+            pass
+    editor.transient(root)
+    editor.grab_set()
+
+    container = tk.Frame(editor, bg=COLORS["bg"], padx=18, pady=16)
+    container.pack(fill="both", expand=True)
+    tk.Label(container, text="Flex JSON Editor", bg=COLORS["bg"], fg=COLORS["text"], font=("Segoe UI Semibold", 16)).pack(anchor="w")
+    tk.Label(
+        container,
+        text="วาง JSON จาก LINE Flex Simulator ได้เลย: bubble, carousel, flex message หรือ body ที่มี messages",
+        bg=COLORS["bg"], fg=COLORS["muted"], font=("Segoe UI", 9),
+    ).pack(anchor="w", pady=(4, 12))
+
+    editor_wrap = tk.Frame(container, bg=COLORS["input"], highlightthickness=1, highlightbackground=COLORS["border"])
+    editor_wrap.pack(fill="both", expand=True)
+    txt_editor = tk.Text(
+        editor_wrap, bg=COLORS["input"], fg=COLORS["text"], insertbackground=COLORS["text"],
+        relief="flat", font=("Cascadia Mono", 9), padx=12, pady=10, wrap="none",
+    )
+    txt_editor.pack(side="left", fill="both", expand=True)
+    editor_scroll_y = ttk.Scrollbar(editor_wrap, command=txt_editor.yview)
+    editor_scroll_y.pack(side="right", fill="y")
+    txt_editor.configure(yscrollcommand=editor_scroll_y.set)
+    txt_editor.insert("1.0", custom_flex_json_value)
+
+    footer = tk.Frame(container, bg=COLORS["bg"])
+    footer.pack(fill="x", pady=(12, 0))
+    editor_status = tk.Label(footer, text="", bg=COLORS["bg"], fg=COLORS["muted"], font=("Segoe UI", 9))
+    editor_status.pack(side="left")
+
+    def check_editor_json():
+        raw = txt_editor.get("1.0", tk.END).strip()
+        try:
+            messages = normalize_custom_flex(raw, get_broadcast_message())
+        except ValueError as error:
+            editor_status.configure(text=str(error), fg=COLORS["danger"])
+            return False
+        editor_status.configure(text=f"JSON ใช้ได้ • {len(messages)} message", fg=COLORS["accent"])
+        return True
+
+    def save_editor_json():
+        global custom_flex_json_value
+        if not check_editor_json():
+            return
+        custom_flex_json_value = txt_editor.get("1.0", tk.END).strip()
+        flex_mode_var.set("custom")
+        save_cloudflare_settings()
+        refresh_flex_preview()
+        update_payload_editor_state(persist=False)
+        editor.destroy()
+
+    tk.Button(
+        footer, text="บันทึก", command=save_editor_json, bg=COLORS["accent"], fg="#06130B",
+        activebackground=COLORS["accent_hover"], relief="flat", cursor="hand2",
+        font=("Segoe UI Semibold", 9), padx=18, pady=7,
+    ).pack(side="right")
+    tk.Button(
+        footer, text="ยกเลิก", command=editor.destroy, bg=COLORS["surface_alt"], fg=COLORS["text"],
+        activebackground=COLORS["border"], activeforeground=COLORS["text"],
+        relief="flat", cursor="hand2", font=("Segoe UI", 9), padx=14, pady=7,
+    ).pack(side="right", padx=(0, 8))
+    tk.Button(
+        footer, text="ตรวจ JSON", command=check_editor_json, bg=COLORS["surface_alt"], fg=COLORS["text"],
+        activebackground=COLORS["border"], activeforeground=COLORS["text"],
+        relief="flat", cursor="hand2", font=("Segoe UI", 9), padx=14, pady=7,
+    ).pack(side="right", padx=(0, 8))
 
 
 def get_send_delay():
@@ -535,6 +970,7 @@ def start_broadcast():
     cf_token = ent_cf_token.get().strip()
     line_tokens = [item["token"] for item in saved_tokens if item["enabled"]]
     broadcast_message = get_broadcast_message()
+    custom_messages = None
 
     if not cf_account or not cf_kv_id or not cf_token:
         messagebox.showwarning("ข้อมูลไม่ครบ", "กรุณากรอกข้อมูล Cloudflare ให้ครบทุกช่อง")
@@ -554,6 +990,10 @@ def start_broadcast():
         ent_send_delay.focus_set()
         ent_send_delay.selection_range(0, tk.END)
         return
+    if flex_mode_var.get() == "custom":
+        custom_messages = validate_custom_flex(show_success=False)
+        if custom_messages is None:
+            return
     if not re.fullmatch(r"[a-fA-F0-9]{32}", cf_account):
         messagebox.showwarning(
             "Account ID ไม่ถูกต้อง",
@@ -583,12 +1023,12 @@ def start_broadcast():
     set_running(True)
     threading.Thread(
         target=process_broadcast,
-        args=(cf_account, cf_kv_id, cf_token, line_tokens, send_delay, broadcast_message),
+        args=(cf_account, cf_kv_id, cf_token, line_tokens, send_delay, broadcast_message, custom_messages),
         daemon=True,
     ).start()
 
 
-def process_broadcast(cf_account, cf_kv_id, cf_token, line_tokens, send_delay, broadcast_message):
+def process_broadcast(cf_account, cf_kv_id, cf_token, line_tokens, send_delay, broadcast_message, custom_messages):
     add_log("กำลังดึงรายชื่อกลุ่มแชทจาก Cloudflare KV...", "info")
     group_ids = []
     headers = {"Authorization": f"Bearer {cf_token}", "Content-Type": "application/json"}
@@ -632,6 +1072,8 @@ def process_broadcast(cf_account, cf_kv_id, cf_token, line_tokens, send_delay, b
     add_log(f"พบ {total_groups} กลุ่ม • พร้อมใช้งาน {len(line_tokens)} บอท", "success")
     if send_delay > 0:
         add_log(f"ตั้ง Delay การส่ง {send_delay:g} วินาทีต่อกลุ่ม", "info")
+    if custom_messages is not None:
+        add_log(f"ใช้ Flex JSON กำหนดเอง • {len(custom_messages)} message", "info")
 
     success_count = 0
     for index, chat_id in enumerate(group_ids):
@@ -642,7 +1084,7 @@ def process_broadcast(cf_account, cf_kv_id, cf_token, line_tokens, send_delay, b
             response = requests.post(
                 "https://api.line.me/v2/bot/message/push",
                 headers={"Content-Type": "application/json", "Authorization": f"Bearer {line_tokens[bot_index]}"},
-                json=get_flex_payload(chat_id, random.choice(FLEX_IMAGES), broadcast_message),
+                json=build_push_payload(chat_id, random.choice(FLEX_IMAGES), broadcast_message, custom_messages),
                 timeout=20,
             )
             if response.status_code == 200:
@@ -686,7 +1128,7 @@ if ICON_PATH.exists():
         root.iconbitmap(default=str(ICON_PATH))
     except tk.TclError:
         pass
-root.geometry("1060x720")
+root.geometry("1180x820")
 root.resizable(False, False)
 root.configure(bg=COLORS["bg"])
 
@@ -695,7 +1137,7 @@ style.theme_use("clam")
 style.configure("Modern.Horizontal.TProgressbar", troughcolor=COLORS["input"], background=COLORS["accent"], borderwidth=0, thickness=8)
 style.configure(
     "Token.Treeview", background=COLORS["input"], fieldbackground=COLORS["input"],
-    foreground=COLORS["text"], borderwidth=0, rowheight=30, font=("Segoe UI", 9),
+    foreground=COLORS["text"], borderwidth=0, rowheight=28, font=("Segoe UI", 9),
 )
 style.configure(
     "Token.Treeview.Heading", background=COLORS["surface_alt"], foreground=COLORS["muted"],
@@ -705,7 +1147,7 @@ style.map("Token.Treeview", background=[("selected", COLORS["border"])], foregro
 
 app = tk.Frame(root, bg=COLORS["bg"])
 app.pack(fill="both", expand=True, padx=26, pady=18)
-app.grid_columnconfigure(0, weight=0, minsize=360)
+app.grid_columnconfigure(0, weight=0, minsize=370)
 app.grid_columnconfigure(1, weight=1)
 app.grid_rowconfigure(1, weight=1)
 
@@ -747,7 +1189,9 @@ tk.Label(left_card, text="บันทึกอัตโนมัติไว้
 right = tk.Frame(app, bg=COLORS["bg"])
 right.grid(row=1, column=1, sticky="nsew")
 right.grid_columnconfigure(0, weight=1)
-right.grid_rowconfigure(2, weight=1)
+right.grid_rowconfigure(2, weight=1, minsize=120)
+right.grid_rowconfigure(3, weight=0)
+flex_mode_var = tk.StringVar(value="template")
 
 token_card = tk.Frame(right, bg=COLORS["surface"], padx=20, pady=14, highlightthickness=1, highlightbackground=COLORS["border"])
 token_card.grid(row=0, column=0, sticky="ew", pady=(0, 12))
@@ -790,7 +1234,7 @@ btn_add_token.grid(row=0, column=2, padx=(8, 0))
 token_wrap = tk.Frame(token_card, bg=COLORS["input"], highlightthickness=1, highlightbackground=COLORS["border"])
 token_wrap.grid(row=3, column=0, sticky="ew")
 token_list = ttk.Treeview(
-    token_wrap, columns=("status", "name", "token"), show="headings", height=3,
+    token_wrap, columns=("status", "name", "token"), show="headings", height=2,
     selectmode="browse", style="Token.Treeview",
 )
 token_list.heading("status", text="สถานะ")
@@ -822,38 +1266,90 @@ tk.Button(token_actions, text="ลบ", command=remove_selected_token, bg=COLORS
 
 settings_card = tk.Frame(right, bg=COLORS["surface"], padx=20, pady=12, highlightthickness=1, highlightbackground=COLORS["border"])
 settings_card.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+settings_card.grid_columnconfigure(0, weight=1)
 settings_card.grid_columnconfigure(1, weight=1)
-tk.Label(settings_card, text="Broadcast Settings", bg=COLORS["surface"], fg=COLORS["text"], font=("Segoe UI Semibold", 11)).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
-tk.Label(settings_card, text="Delay ส่ง / กลุ่ม (วินาที)", bg=COLORS["surface"], fg=COLORS["muted"], font=("Segoe UI", 8)).grid(row=1, column=0, sticky="w", padx=(0, 12))
+tk.Label(settings_card, text="Broadcast Composer", bg=COLORS["surface"], fg=COLORS["text"], font=("Segoe UI Semibold", 12)).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+composer_left = tk.Frame(settings_card, bg=COLORS["surface"])
+composer_left.grid(row=1, column=0, sticky="nsew", padx=(0, 14))
+composer_left.grid_columnconfigure(0, weight=1)
+tk.Label(composer_left, text="Delay / กลุ่ม (วินาที)", bg=COLORS["surface"], fg=COLORS["muted"], font=("Segoe UI", 8)).grid(row=0, column=0, sticky="w")
 ent_send_delay = tk.Entry(
-    settings_card, width=10, bg=COLORS["input"], fg=COLORS["text"], insertbackground=COLORS["text"],
+    composer_left, width=10, bg=COLORS["input"], fg=COLORS["text"], insertbackground=COLORS["text"],
     relief="flat", font=("Segoe UI", 9),
     highlightthickness=1, highlightbackground=COLORS["border"], highlightcolor=COLORS["accent"],
 )
-ent_send_delay.grid(row=2, column=0, sticky="w", ipady=7, padx=(0, 12))
+ent_send_delay.grid(row=1, column=0, sticky="ew", ipady=7, pady=(4, 8))
 ent_send_delay.insert(0, "0")
 ent_send_delay.bind("<FocusOut>", save_cloudflare_settings)
-tk.Label(settings_card, text="ข้อความ Broadcast / altText", bg=COLORS["surface"], fg=COLORS["muted"], font=("Segoe UI", 8)).grid(row=1, column=1, sticky="w")
+tk.Label(composer_left, text="ข้อความ Broadcast / altText", bg=COLORS["surface"], fg=COLORS["muted"], font=("Segoe UI", 8)).grid(row=2, column=0, sticky="w")
 txt_broadcast_message = tk.Text(
-    settings_card, height=1, bg=COLORS["input"], fg=COLORS["text"], insertbackground=COLORS["text"],
+    composer_left, height=2, bg=COLORS["input"], fg=COLORS["text"], insertbackground=COLORS["text"],
     relief="flat", font=("Segoe UI", 9), padx=8, pady=6, wrap="word",
     highlightthickness=1, highlightbackground=COLORS["border"], highlightcolor=COLORS["accent"],
 )
-txt_broadcast_message.grid(row=2, column=1, sticky="ew")
+txt_broadcast_message.grid(row=3, column=0, sticky="ew", pady=(4, 8))
 txt_broadcast_message.insert("1.0", DEFAULT_BROADCAST_MESSAGE)
 txt_broadcast_message.bind("<FocusOut>", save_cloudflare_settings)
+
+composer_right = tk.Frame(settings_card, bg=COLORS["surface"])
+composer_right.grid(row=1, column=1, sticky="nsew")
+composer_right.grid_columnconfigure(0, weight=1)
+tk.Label(composer_right, text="Flex Mode", bg=COLORS["surface"], fg=COLORS["muted"], font=("Segoe UI", 8)).grid(row=0, column=0, sticky="w")
+payload_modes = tk.Frame(composer_right, bg=COLORS["surface"])
+payload_modes.grid(row=1, column=0, sticky="ew", pady=(4, 8))
+tk.Radiobutton(
+    payload_modes, text="Template เดิม", variable=flex_mode_var, value="template",
+    command=update_payload_editor_state, bg=COLORS["surface"], fg=COLORS["text"],
+    activebackground=COLORS["surface"], activeforeground=COLORS["text"],
+    selectcolor=COLORS["input"], font=("Segoe UI", 8),
+).pack(side="left")
+tk.Radiobutton(
+    payload_modes, text="Flex JSON", variable=flex_mode_var, value="custom",
+    command=update_payload_editor_state, bg=COLORS["surface"], fg=COLORS["text"],
+    activebackground=COLORS["surface"], activeforeground=COLORS["text"],
+    selectcolor=COLORS["input"], font=("Segoe UI", 8),
+).pack(side="left", padx=(10, 0))
+payload_hint = tk.Label(
+    composer_right, text="โหมด Template เดิม: ใช้รูป/ปุ่มตามที่ตั้งไว้",
+    bg=COLORS["surface"], fg=COLORS["muted"], font=("Segoe UI", 8), anchor="w",
+)
+payload_hint.grid(row=2, column=0, sticky="ew", pady=(0, 4))
+flex_status = tk.Label(
+    composer_right, text="ใช้ Flex Template ที่มากับโปรแกรม",
+    bg=COLORS["surface_alt"], fg=COLORS["muted"], font=("Segoe UI Semibold", 8),
+    anchor="w", padx=10, pady=7,
+)
+flex_status.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+flex_buttons = tk.Frame(composer_right, bg=COLORS["surface"])
+flex_buttons.grid(row=4, column=0, sticky="ew")
+flex_buttons.grid_columnconfigure(0, weight=1)
+flex_buttons.grid_columnconfigure(1, weight=1)
+btn_edit_flex = tk.Button(
+    flex_buttons, text="แก้ไข Flex JSON", command=open_custom_flex_editor, bg=COLORS["accent"],
+    fg="#06130B", activebackground=COLORS["accent_hover"],
+    relief="flat", cursor="hand2", font=("Segoe UI Semibold", 9), padx=10, pady=7,
+)
+btn_edit_flex.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+btn_preview_flex = tk.Button(
+    flex_buttons, text="ดูตัวอย่างเต็ม", command=open_full_flex_preview, bg=COLORS["surface_alt"],
+    fg=COLORS["text"], activebackground=COLORS["border"], activeforeground=COLORS["text"],
+    relief="flat", cursor="hand2", font=("Segoe UI Semibold", 9), padx=10, pady=7,
+)
+btn_preview_flex.grid(row=0, column=1, sticky="ew")
+update_payload_editor_state(persist=False)
 
 log_card = tk.Frame(right, bg=COLORS["surface"], padx=20, pady=14, highlightthickness=1, highlightbackground=COLORS["border"])
 log_card.grid(row=2, column=0, sticky="nsew")
 log_card.grid_columnconfigure(0, weight=1)
-log_card.grid_rowconfigure(2, weight=1, minsize=92)
+log_card.grid_rowconfigure(2, weight=1, minsize=82)
 tk.Label(log_card, text="Activity log", bg=COLORS["surface"], fg=COLORS["text"], font=("Segoe UI Semibold", 12)).grid(row=0, column=0, sticky="w")
 progress = ttk.Progressbar(log_card, style="Modern.Horizontal.TProgressbar", mode="determinate")
 progress.grid(row=1, column=0, sticky="ew", pady=(10, 10))
 
 log_wrap = tk.Frame(log_card, bg=COLORS["input"])
 log_wrap.grid(row=2, column=0, sticky="nsew")
-txt_log = tk.Text(log_wrap, bg=COLORS["input"], fg=COLORS["muted"], insertbackground=COLORS["text"], relief="flat", font=("Cascadia Mono", 9), padx=12, pady=10, state="disabled", wrap="word")
+txt_log = tk.Text(log_wrap, height=4, bg=COLORS["input"], fg=COLORS["muted"], insertbackground=COLORS["text"], relief="flat", font=("Cascadia Mono", 9), padx=12, pady=10, state="disabled", wrap="word")
 txt_log.pack(side="left", fill="both", expand=True)
 log_scroll = ttk.Scrollbar(log_wrap, command=txt_log.yview)
 log_scroll.pack(side="right", fill="y")
@@ -863,13 +1359,16 @@ txt_log.tag_configure("error", foreground=COLORS["danger"])
 txt_log.tag_configure("warning", foreground="#F7C65C")
 txt_log.tag_configure("info", foreground="#65B7FF")
 
+footer_bar = tk.Frame(right, bg=COLORS["bg"])
+footer_bar.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+footer_bar.grid_columnconfigure(0, weight=1)
 btn_start = tk.Button(
-    right, text="เริ่ม Broadcast  →", command=start_broadcast,
+    footer_bar, text="เริ่ม Broadcast  →", command=start_broadcast,
     bg=COLORS["accent"], fg="#06130B", activebackground=COLORS["accent_hover"],
     activeforeground="#FFFFFF", disabledforeground="#647067", relief="flat",
-    font=("Segoe UI Semibold", 11), cursor="hand2", pady=10,
+    font=("Segoe UI Semibold", 12), cursor="hand2", pady=12,
 )
-btn_start.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+btn_start.grid(row=0, column=0, sticky="ew")
 
 load_tokens()
 load_cloudflare_settings()
