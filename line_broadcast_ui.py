@@ -53,6 +53,8 @@ VERSION_PATH = RESOURCE_DIR / "version.txt"
 GITHUB_REPOSITORY = "mynut0402/line-broadcast-studio"
 GITHUB_LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
 UPDATE_ASSET_NAME = "LINE Broadcast Studio.exe"
+LINE_QUOTA_API = "https://api.line.me/v2/bot/message/quota"
+LINE_QUOTA_CONSUMPTION_API = "https://api.line.me/v2/bot/message/quota/consumption"
 saved_tokens = []
 update_check_running = False
 DEFAULT_BROADCAST_MESSAGE = "สิทธิพิเศษระดับ SVIP สำหรับคุณ คืนยอดเสียทันที"
@@ -897,6 +899,37 @@ def masked_token(token):
     return f"{token[:10]}{'•' * 14}{token[-6:]}"
 
 
+def format_token_quota(item):
+    status = item.get("quota_status")
+    if status == "unlimited":
+        return "Unlimited"
+    if status == "limited":
+        limit = item.get("quota_limit")
+        used = item.get("quota_used", 0)
+        remaining = item.get("quota_remaining")
+        if isinstance(remaining, int):
+            return f"Left {remaining} / {limit}"
+        return f"Used {used} / {limit}"
+    if status == "full":
+        return "Monthly limit"
+    if status == "error":
+        return "Check failed"
+    return "Not checked"
+
+
+def token_name(item, index):
+    return item.get("name") or f"LINE OA {index + 1}"
+
+
+def update_saved_token_quota(token, quota):
+    for item in saved_tokens:
+        if item.get("token") == token:
+            item.update(quota)
+            break
+    save_tokens()
+    refresh_token_list()
+
+
 def refresh_token_list():
     for item in token_list.get_children():
         token_list.delete(item)
@@ -908,6 +941,7 @@ def refresh_token_list():
                 "☑  พร้อมส่ง" if enabled else "☐  ปิดใช้งาน",
                 item.get("name", f"LINE OA {index + 1}"),
                 masked_token(item["token"]),
+                format_token_quota(item),
             ),
             tags=("enabled" if enabled else "disabled",),
         )
@@ -1018,11 +1052,109 @@ def show_token_context_menu(event):
         token_context_menu.grab_release()
 
 
+def parse_line_quota(token):
+    headers = {"Authorization": f"Bearer {token}"}
+    quota_response = requests.get(LINE_QUOTA_API, headers=headers, timeout=20)
+    quota_response.raise_for_status()
+    quota_data = quota_response.json()
+    quota_type = quota_data.get("type")
+    if quota_type == "none":
+        return {
+            "quota_status": "unlimited",
+            "quota_limit": None,
+            "quota_used": 0,
+            "quota_remaining": None,
+        }
+
+    limit = quota_data.get("value")
+    usage_response = requests.get(LINE_QUOTA_CONSUMPTION_API, headers=headers, timeout=20)
+    usage_response.raise_for_status()
+    usage_data = usage_response.json()
+    used = int(usage_data.get("totalUsage", 0) or 0)
+    if isinstance(limit, int):
+        remaining = max(0, limit - used)
+        return {
+            "quota_status": "full" if remaining <= 0 else "limited",
+            "quota_limit": limit,
+            "quota_used": used,
+            "quota_remaining": remaining,
+        }
+
+    return {
+        "quota_status": "error",
+        "quota_limit": None,
+        "quota_used": used,
+        "quota_remaining": None,
+        "quota_error": f"unknown quota type: {quota_type}",
+    }
+
+
+def check_enabled_token_quotas(show_popup=True):
+    enabled_items = [(index, item) for index, item in enumerate(saved_tokens) if item.get("enabled")]
+    if not enabled_items:
+        if show_popup:
+            ui_call(messagebox.showwarning, "Quota", "No enabled LINE token")
+        return
+
+    def worker():
+        usable = 0
+        full = 0
+        failed = 0
+        add_log("Checking LINE monthly quota before sending...", "info")
+        for index, item in enabled_items:
+            name = token_name(item, index)
+            token = item["token"]
+            try:
+                quota = parse_line_quota(token)
+                if quota["quota_status"] in ("unlimited", "limited"):
+                    usable += 1
+                elif quota["quota_status"] == "full":
+                    full += 1
+                ui_call(update_saved_token_quota, token, quota)
+                add_log(f"Quota {name}: {format_token_quota(quota)}", "info")
+            except Exception as error:
+                failed += 1
+                quota = {
+                    "quota_status": "error",
+                    "quota_limit": None,
+                    "quota_used": None,
+                    "quota_remaining": None,
+                    "quota_error": str(error),
+                }
+                ui_call(update_saved_token_quota, token, quota)
+                add_log(f"Quota {name}: check failed - {error}", "warning")
+        if show_popup:
+            ui_call(messagebox.showinfo, "Quota summary", f"Usable: {usable}\nMonthly limit: {full}\nCheck failed: {failed}")
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def is_quota_full(quota):
+    return quota.get("quota_status") == "full" or quota.get("quota_remaining") == 0
+
+
+def is_monthly_limit_error(response, detail):
+    text = str(detail).lower()
+    return response.status_code in (429, 403) and any(word in text for word in ("monthly", "quota", "limit"))
+
+
 def start_broadcast():
     cf_account = ent_account.get().strip()
     cf_kv_id = ent_kv.get().strip()
     cf_token = ent_cf_token.get().strip()
-    line_tokens = [item["token"] for item in saved_tokens if item["enabled"]]
+    line_tokens = [
+        {
+            "index": index,
+            "name": token_name(item, index),
+            "token": item["token"],
+            "quota_status": item.get("quota_status"),
+            "quota_limit": item.get("quota_limit"),
+            "quota_used": item.get("quota_used"),
+            "quota_remaining": item.get("quota_remaining"),
+        }
+        for index, item in enumerate(saved_tokens)
+        if item["enabled"]
+    ]
     broadcast_message = get_broadcast_message()
     custom_messages = None
 
@@ -1120,6 +1252,131 @@ def process_broadcast(cf_account, cf_kv_id, cf_token, line_tokens, send_delay, b
         add_log("กรุณาตั้ง LINE Webhook และส่งข้อความในกลุ่มอย่างน้อย 1 ครั้ง", "info")
         set_running(False)
         return
+
+    total_groups = len(group_ids)
+    message_units = len(custom_messages) if custom_messages is not None else 1
+    ui_call(progress.configure, maximum=total_groups)
+    add_log(f"Found {total_groups} groups • checking quota for {len(line_tokens)} LINE tokens", "success")
+    if send_delay > 0:
+        add_log(f"Delay: {send_delay:g} seconds/group", "info")
+    if custom_messages is not None:
+        add_log(f"Using custom Flex JSON • {len(custom_messages)} message(s)/group", "info")
+
+    usable_tokens = []
+    for bot in line_tokens:
+        try:
+            quota = parse_line_quota(bot["token"])
+            bot.update(quota)
+            ui_call(update_saved_token_quota, bot["token"], quota)
+            add_log(f"Quota {bot['name']}: {format_token_quota(quota)}", "info")
+            if quota.get("quota_status") in ("unlimited", "limited") and not is_quota_full(quota):
+                usable_tokens.append(bot)
+            else:
+                add_log(f"Skip {bot['name']}: monthly quota is full", "warning")
+        except Exception as error:
+            quota = {
+                "quota_status": "error",
+                "quota_limit": None,
+                "quota_used": None,
+                "quota_remaining": None,
+                "quota_error": str(error),
+            }
+            bot.update(quota)
+            ui_call(update_saved_token_quota, bot["token"], quota)
+            add_log(f"Quota {bot['name']}: check failed - will still try. {error}", "warning")
+            usable_tokens.append(bot)
+
+    if not usable_tokens:
+        add_log("No LINE token has remaining monthly quota. Broadcast stopped.", "error")
+        set_running(False)
+        ui_call(messagebox.showwarning, "Monthly limit", "All enabled LINE tokens are already at monthly limit.")
+        return
+
+    success_count = 0
+    skipped_count = 0
+    token_cursor = 0
+    for index, chat_id in enumerate(group_ids):
+        if not usable_tokens:
+            add_log("All LINE tokens reached monthly limit. Remaining groups were skipped.", "error")
+            skipped_count += total_groups - index
+            break
+
+        sent = False
+        attempts = 0
+        last_error = ""
+        while attempts < len(usable_tokens) and usable_tokens:
+            bot = usable_tokens[token_cursor % len(usable_tokens)]
+            token_cursor = (token_cursor + 1) % len(usable_tokens)
+            attempts += 1
+
+            if bot.get("quota_status") == "limited" and isinstance(bot.get("quota_remaining"), int) and bot["quota_remaining"] < message_units:
+                add_log(f"Skip {bot['name']}: not enough quota left ({bot['quota_remaining']})", "warning")
+                bot["quota_status"] = "full"
+                bot["quota_remaining"] = 0
+                ui_call(update_saved_token_quota, bot["token"], bot.copy())
+                usable_tokens.remove(bot)
+                if usable_tokens:
+                    token_cursor %= len(usable_tokens)
+                continue
+
+            add_log(f"[{index + 1}/{total_groups}] {bot['name']} -> {chat_id}")
+            try:
+                response = requests.post(
+                    "https://api.line.me/v2/bot/message/push",
+                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {bot['token']}"},
+                    json=build_push_payload(chat_id, random.choice(FLEX_IMAGES), broadcast_message, custom_messages),
+                    timeout=20,
+                )
+                if response.status_code == 200:
+                    success_count += 1
+                    sent = True
+                    if bot.get("quota_status") == "limited" and isinstance(bot.get("quota_remaining"), int):
+                        bot["quota_used"] = int(bot.get("quota_used") or 0) + message_units
+                        bot["quota_remaining"] = max(0, bot["quota_remaining"] - message_units)
+                        if bot["quota_remaining"] <= 0:
+                            bot["quota_status"] = "full"
+                            add_log(f"{bot['name']} reached monthly limit and will be skipped from now on.", "warning")
+                            usable_tokens.remove(bot)
+                            if usable_tokens:
+                                token_cursor %= len(usable_tokens)
+                        ui_call(update_saved_token_quota, bot["token"], bot.copy())
+                    add_log("   sent", "success")
+                    break
+
+                try:
+                    detail = response.json().get("message", response.text)
+                except ValueError:
+                    detail = response.text
+                last_error = str(detail)
+                if is_monthly_limit_error(response, detail):
+                    add_log(f"   monthly limit: {bot['name']} skipped", "warning")
+                    bot["quota_status"] = "full"
+                    bot["quota_remaining"] = 0
+                    ui_call(update_saved_token_quota, bot["token"], bot.copy())
+                    usable_tokens.remove(bot)
+                    if usable_tokens:
+                        token_cursor %= len(usable_tokens)
+                    continue
+                add_log(f"   failed: {detail}", "error")
+                break
+            except Exception as error:
+                last_error = str(error)
+                add_log(f"   LINE error: {error}", "error")
+                break
+
+        if not sent:
+            skipped_count += 1
+            if last_error:
+                add_log(f"   skipped group: {last_error}", "warning")
+
+        ui_call(progress.configure, value=index + 1)
+        if send_delay > 0 and index < total_groups - 1:
+            time.sleep(send_delay)
+
+    add_log(f"Finished • sent {success_count}/{total_groups} groups • skipped {skipped_count}", "success")
+    set_running(False)
+    ui_call(messagebox.showinfo, "Broadcast finished", f"Sent {success_count} of {total_groups} groups\nSkipped {skipped_count}")
+    return
 
     total_groups = len(group_ids)
     ui_call(progress.configure, maximum=total_groups)
@@ -1288,15 +1545,17 @@ btn_add_token.grid(row=0, column=2, padx=(8, 0))
 token_wrap = tk.Frame(token_card, bg=COLORS["input"], highlightthickness=1, highlightbackground=COLORS["border"])
 token_wrap.grid(row=3, column=0, sticky="ew")
 token_list = ttk.Treeview(
-    token_wrap, columns=("status", "name", "token"), show="headings", height=2,
+    token_wrap, columns=("status", "name", "token", "quota"), show="headings", height=2,
     selectmode="browse", style="Token.Treeview",
 )
 token_list.heading("status", text="สถานะ")
 token_list.heading("name", text="ชื่อ LINE OA")
 token_list.heading("token", text="TOKEN ที่บันทึกไว้")
+token_list.heading("quota", text="Quota")
 token_list.column("status", width=105, minwidth=105, stretch=False, anchor="center")
-token_list.column("name", width=145, minwidth=100, stretch=False, anchor="w")
-token_list.column("token", width=245, minwidth=180, anchor="w")
+token_list.column("name", width=135, minwidth=100, stretch=False, anchor="w")
+token_list.column("token", width=215, minwidth=180, anchor="w")
+token_list.column("quota", width=135, minwidth=110, stretch=False, anchor="w")
 token_list.pack(side="left", fill="both", expand=True)
 token_list.bind("<Button-1>", token_list_click)
 token_list.bind("<Button-3>", show_token_context_menu)
@@ -1317,6 +1576,8 @@ token_actions = tk.Frame(token_card, bg=COLORS["surface"])
 token_actions.grid(row=4, column=0, sticky="ew", pady=(9, 0))
 tk.Label(token_actions, text="คลิก Checkbox ด้านหน้าสถานะเพื่อเปิด/ปิด", bg=COLORS["surface"], fg=COLORS["muted"], font=("Segoe UI", 8)).pack(side="left")
 tk.Button(token_actions, text="ลบ", command=remove_selected_token, bg=COLORS["surface"], fg=COLORS["danger"], activebackground=COLORS["surface_alt"], activeforeground=COLORS["danger"], relief="flat", cursor="hand2", font=("Segoe UI", 8), padx=8).pack(side="right")
+
+tk.Button(token_actions, text="Check quota", command=lambda: check_enabled_token_quotas(show_popup=True), bg=COLORS["surface_alt"], fg=COLORS["text"], activebackground=COLORS["border"], activeforeground=COLORS["text"], relief="flat", cursor="hand2", font=("Segoe UI", 8), padx=8).pack(side="right", padx=(0, 8))
 
 settings_card = tk.Frame(right, bg=COLORS["surface"], padx=20, pady=12, highlightthickness=1, highlightbackground=COLORS["border"])
 settings_card.grid(row=1, column=0, sticky="ew", pady=(0, 12))
